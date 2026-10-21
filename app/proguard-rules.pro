@@ -1,0 +1,2 @@
+-keep class androidx.compose.ui.window.** { *; }
+-keep class androidx.compose.ui.viewinterop.** { *; }
