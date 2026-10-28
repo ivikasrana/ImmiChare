@@ -30,8 +30,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job as CoJob
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,6 +44,8 @@ import java.io.File
 import java.io.IOException
 import java.net.URLDecoder
 import java.time.Instant
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicInteger
 
 class TransferService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -105,31 +110,36 @@ class TransferService : Service() {
         }
     }
 
-    private suspend fun run(job: Job) {
-        val api = Immich(this, job.link, job.token)
-        val failed = mutableListOf<Pair<Item, String>>()
-        var done = 0
-        var duplicates = 0
+    private suspend fun run(job: Job) = coroutineScope {
+        val api = Immich(this@TransferService, job.link, job.token)
+        val failed = ConcurrentLinkedQueue<Pair<Item, String>>()
+        val done = AtomicInteger()
+        val duplicates = AtomicInteger()
+        val finished = AtomicInteger()
         val total = job.items.size
-        val context = currentCoroutineContext()
         val verb = if (job.upload) "Uploading" else "Downloading"
-        job.items.forEachIndexed { i, item ->
-            context.ensureActive()
-            val text = "$verb ${i + 1}/$total · ${item.name ?: "item ${i + 1}"}"
-            progress(job, text, i, total, 0)
-            val onProgress = { sent: Long, length: Long ->
-                context.ensureActive()
-                if (length > 0) progress(job, text, i, total, (sent * 100 / length).toInt())
+        val parallel = if (job.upload) 1 else DOWNLOAD_PARALLELISM
+        val gate = Semaphore(parallel)
+        job.items.mapIndexed { i, item ->
+            launch {
+                gate.withPermit {
+                    val text = "$verb ${i + 1}/$total · ${item.name ?: "item ${i + 1}"}"
+                    progress(job, text, finished.get(), total, 0)
+                    val onProgress = { sent: Long, length: Long ->
+                        ensureActive()
+                        if (parallel == 1 && length > 0) progress(job, text, i, total, (sent * 100 / length).toInt())
+                    }
+                    withRetry {
+                        if (job.upload) upload(api, item, onProgress) else download(api, item, onProgress)
+                    }.fold(
+                        onSuccess = { if (it == UploadStatus.Duplicate) duplicates.incrementAndGet() else done.incrementAndGet() },
+                        onFailure = { failed += item to (it.message ?: it.javaClass.simpleName) },
+                    )
+                    finished.incrementAndGet()
+                }
             }
-            val result = withRetry {
-                if (job.upload) upload(api, item, onProgress) else download(api, item, onProgress)
-            }
-            result.fold(
-                onSuccess = { if (it == UploadStatus.Duplicate) duplicates++ else done++ },
-                onFailure = { failed += item to (it.message ?: it.javaClass.simpleName) },
-            )
-        }
-        summary(job, done, duplicates, failed)
+        }.joinAll()
+        summary(job, done.get(), duplicates.get(), failed.toList())
     }
 
     private suspend fun <T> withRetry(block: suspend () -> T): Result<T> {
@@ -149,6 +159,7 @@ class TransferService : Service() {
         return Result.failure(IllegalStateException())
     }
 
+    @Synchronized
     private fun progress(job: Job, text: String, index: Int, total: Int, pct: Int) {
         val now = System.currentTimeMillis()
         if (now - lastNotify < 500 && pct in 1..99) return
@@ -292,6 +303,7 @@ class TransferService : Service() {
         private const val CHANNEL_DONE = "transfer-done"
         private const val FOREGROUND_ID = 1
         private const val NOTIFY_BASE = 1000
+        private const val DOWNLOAD_PARALLELISM = 3
         private const val EXTRA_JOB = "job"
         private const val EXTRA_NOTIFICATION = "notification"
         const val RETRY = "com.vik.immishare.RETRY"
