@@ -28,6 +28,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -129,16 +130,20 @@ fun Browse(link: ShareLink, onBack: () -> Unit) {
 
     val current = info
     val assets = current?.assets.orEmpty()
-    val chosen = assets.filter { selected[it.id] == true }
+    val chosen by remember(assets) { derivedStateOf { assets.filter { selected[it.id] == true } } }
     fun select(list: List<Asset>) {
         list.forEach { selected[it.id] = true }
         scope.launch { fetchDetails(api, list.map { it.id }, details, loading) }
     }
-    val known = chosen.mapNotNull { (details[it.id] ?: it).size }
-    val totalText = when {
-        chosen.isEmpty() -> ""
-        known.size < chosen.size -> "${formatSize(known.sum())}+"
-        else -> formatSize(known.sum())
+    val totalText by remember(assets) {
+        derivedStateOf {
+            val known = chosen.mapNotNull { (details[it.id] ?: it).size }
+            when {
+                chosen.isEmpty() -> ""
+                known.size < chosen.size -> "${formatSize(known.sum())}+"
+                else -> formatSize(known.sum())
+            }
+        }
     }
 
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 12.dp)) {

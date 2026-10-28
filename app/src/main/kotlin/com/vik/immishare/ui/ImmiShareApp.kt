@@ -310,7 +310,7 @@ private fun UploadPicker(uris: List<Uri>, onBack: () -> Unit, onDone: () -> Unit
         links.forEach { item ->
             launch {
                 checking[item.link] = "Checking"
-                runCatching { withContext(Dispatchers.IO) { Immich(ctx, item.link, item.token).linkInfo() } }
+                runCatching { withContext(Dispatchers.IO) { Immich(ctx, item.link, item.token).linkInfo(withAssets = false) } }
                     .onSuccess { saveLinkInfo(ctx, item.link, it, item.token, used = false); checking.remove(item.link) }
                     .onFailure { checking[item.link] = describe(it, item) }
             }
@@ -323,7 +323,7 @@ private fun UploadPicker(uris: List<Uri>, onBack: () -> Unit, onDone: () -> Unit
         error = ""
         scope.launch {
             val api = Immich(ctx, link, saved?.token.orEmpty())
-            runCatching { withContext(Dispatchers.IO) { api.linkInfo() } }
+            runCatching { withContext(Dispatchers.IO) { api.linkInfo(withAssets = false) } }
                 .onSuccess { info ->
                     saveLinkInfo(ctx, link, info, api.token)
                     if (!info.allowUpload) {

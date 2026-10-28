@@ -18,6 +18,8 @@ import java.net.URLEncoder
 import java.net.UnknownHostException
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
 import javax.net.ssl.SSLException
 
 class Asset(
@@ -68,7 +70,7 @@ sealed class ApiError(message: String) : IOException(message) {
     class InvalidLink : ApiError("This link is invalid or has expired")
     class Forbidden(detail: String) : ApiError(detail.ifBlank { "This link does not allow that" })
     class NotFound : ApiError("Not found on the server")
-    class Server(code: Int, detail: String) : ApiError("Server error $code${if (detail.isBlank()) "" else ": $detail"}")
+    class Server(val code: Int, detail: String) : ApiError("Server error $code${if (detail.isBlank()) "" else ": $detail"}")
 }
 
 class Immich(context: Context, val link: ShareLink, var token: String = "") {
@@ -146,7 +148,7 @@ class Immich(context: Context, val link: ShareLink, var token: String = "") {
 
     private fun json(c: HttpURLConnection) = c.inputStream.use { it.readBytes().decodeToString() }
 
-    fun linkInfo(): LinkInfo {
+    fun linkInfo(withAssets: Boolean = true): LinkInfo {
         val o = JSONObject(call(open("/shared-links/me"), read = ::json))
         val album = o.optJSONObject("album")
         val arr = o.optJSONArray("assets") ?: JSONArray()
@@ -163,7 +165,7 @@ class Immich(context: Context, val link: ShareLink, var token: String = "") {
             description = o.str("description"),
             albumId = albumId,
             albumName = album?.str("albumName"),
-            assets = if (isAlbum && assets.isEmpty() && albumId != null) albumAssets(albumId) else assets,
+            assets = if (withAssets && isAlbum && assets.isEmpty() && albumId != null) albumAssets(albumId) else assets,
         )
     }
 
@@ -186,24 +188,39 @@ class Immich(context: Context, val link: ShareLink, var token: String = "") {
     private fun albumAssets(albumId: String): List<Asset> {
         val query = mapOf("albumId" to albumId, "order" to "asc")
         val buckets = JSONArray(call(open("/timeline/buckets", query), read = ::json))
-        return (0 until buckets.length()).flatMap { i ->
-            val bucket = buckets.getJSONObject(i).getString("timeBucket")
-            val o = JSONObject(call(open("/timeline/bucket", query + ("timeBucket" to bucket)), read = ::json))
-            val ids = o.getJSONArray("id")
-            val images = o.optJSONArray("isImage")
-            val durations = o.optJSONArray("duration")
-            val created = o.optJSONArray("fileCreatedAt")
-            (0 until ids.length()).map { k ->
-                Asset(
-                    id = ids.getString(k),
-                    isVideo = images?.optBoolean(k, true) == false,
-                    durationMs = durations?.let { parseDuration(it.opt(k)) },
-                    fileName = null,
-                    size = null,
-                    createdAt = created?.takeUnless { it.isNull(k) }?.optString(k),
-                    mimeType = null,
-                )
+        val names = (0 until buckets.length()).map { buckets.getJSONObject(it).getString("timeBucket") }
+        if (names.isEmpty()) return emptyList()
+        val pool = Executors.newFixedThreadPool(minOf(BUCKET_PARALLELISM, names.size))
+        try {
+            val tasks = names.map { bucket -> Callable { bucketAssets(query + ("timeBucket" to bucket)) } }
+            return pool.invokeAll(tasks).flatMap {
+                try {
+                    it.get()
+                } catch (e: java.util.concurrent.ExecutionException) {
+                    throw e.cause ?: e
+                }
             }
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    private fun bucketAssets(query: Map<String, String>): List<Asset> {
+        val o = JSONObject(call(open("/timeline/bucket", query), read = ::json))
+        val ids = o.getJSONArray("id")
+        val images = o.optJSONArray("isImage")
+        val durations = o.optJSONArray("duration")
+        val created = o.optJSONArray("fileCreatedAt")
+        return (0 until ids.length()).map { k ->
+            Asset(
+                id = ids.getString(k),
+                isVideo = images?.optBoolean(k, true) == false,
+                durationMs = durations?.let { parseDuration(it.opt(k)) },
+                fileName = null,
+                size = null,
+                createdAt = created?.takeUnless { it.isNull(k) }?.optString(k),
+                mimeType = null,
+            )
         }
     }
 
@@ -253,6 +270,7 @@ class Immich(context: Context, val link: ShareLink, var token: String = "") {
 
     companion object {
         const val TOKEN_COOKIE = "immich_shared_link_token"
+        private const val BUCKET_PARALLELISM = 4
 
         private fun JSONObject.str(name: String): String? = if (isNull(name)) null else optString(name).takeIf { it.isNotEmpty() }
 

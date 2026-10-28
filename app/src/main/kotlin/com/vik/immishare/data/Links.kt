@@ -37,11 +37,13 @@ object Links {
 
     fun find(c: Context, link: ShareLink): SavedLink? = all(c).value.firstOrNull { it.link == link }
 
+    @Synchronized
     fun upsert(c: Context, item: SavedLink) {
         val list = all(c).value.filterNot { it.link == item.link }
         write(c, (listOf(item) + list).take(MAX))
     }
 
+    @Synchronized
     fun update(c: Context, link: ShareLink, toFront: Boolean = true, change: (SavedLink) -> SavedLink) {
         val list = all(c).value
         val i = list.indexOfFirst { it.link == link }
@@ -49,6 +51,7 @@ object Links {
         write(c, list.toMutableList().apply { set(i, change(get(i)).copy(link = link)) })
     }
 
+    @Synchronized
     fun rename(c: Context, old: ShareLink, nickname: String, base: String) {
         val list = all(c).value.toMutableList()
         val i = list.indexOfFirst { it.link == old }
@@ -57,6 +60,7 @@ object Links {
         write(c, list.distinctBy { it.link })
     }
 
+    @Synchronized
     fun delete(c: Context, link: ShareLink) = write(c, all(c).value.filterNot { it.link == link })
 
     private fun write(c: Context, list: List<SavedLink>) {

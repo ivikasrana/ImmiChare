@@ -140,7 +140,7 @@ class TransferService : Service() {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                val transient = e is ApiError.Unreachable || e is ApiError.NoNetwork || e is ApiError.Server || (e is IOException && e !is ApiError)
+                val transient = e is ApiError.Unreachable || e is ApiError.NoNetwork || (e is ApiError.Server && e.code >= 500) || (e is IOException && e !is ApiError)
                 if (!transient || attempt == 2) return Result.failure(e)
                 delay(wait)
                 wait *= 3
